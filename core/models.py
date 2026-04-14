@@ -114,14 +114,16 @@ class ClassificationResult:
     Output of DocumentClassifierSkill.
 
     `doc_type`   : "questionnaire" | "normal_document"
+    `domain`     : Detected document domain/industry (e.g. "Financial")
     `confidence` : 0.0 – 1.0
     `method`     : "heuristic" | "llm" | "hybrid"
     `signals`    : diagnostic dict of matched patterns / scores
     """
 
     doc_type: str
-    confidence: float
-    method: str
+    domain: str = "General"
+    confidence: float = 0.0
+    method: str = "unknown"
     signals: Dict[str, Any] = field(default_factory=dict)
 
 

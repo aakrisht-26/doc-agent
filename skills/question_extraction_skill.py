@@ -101,7 +101,7 @@ class QuestionExtractionSkill(BaseSkill):
         super().__init__(config)
         self._dedup        = self.get_config("dedup", True)
         self._max_q        = self.get_config("max_questions", 200)
-        self._min_len      = 8
+        self._min_len      = 4
         self._llm_threshold = self.get_config("llm_threshold", 0)
 
         from utils.llm_client import LLMClient
@@ -113,6 +113,7 @@ class QuestionExtractionSkill(BaseSkill):
         start    = time.monotonic()
         full_text: str = inputs.data["full_text"]
         doc_type: str  = inputs.data.get("doc_type", "normal_document")
+        domain: str    = inputs.data.get("domain", "General")
         force: bool    = inputs.data.get("force", False)
 
         if doc_type != "questionnaire" and not force:
@@ -129,10 +130,8 @@ class QuestionExtractionSkill(BaseSkill):
 
         # ── Layer 2: LLM ───────────────────────────────────────────────────
         llm_q: List[str] = []
-        if self._llm.available and len(regex_q) <= self._llm_threshold or (
-            self._llm.available and len(regex_q) < 5
-        ):
-            llm_q = self._llm_extract(full_text)
+        if self._llm.available:
+            llm_q = self._llm_extract(full_text, domain)
             self.logger.info(
                 f"LLM ({self._llm.provider_label}): {len(llm_q)} candidates"
             )
@@ -203,29 +202,27 @@ class QuestionExtractionSkill(BaseSkill):
 
     # ── LLM extraction ─────────────────────────────────────────────────────────
 
-    def _llm_extract(self, full_text: str) -> List[str]:
+    def _llm_extract(self, full_text: str, domain: str) -> List[str]:
         windows       = self._split_into_windows(full_text, window=5000, overlap=200)
         all_questions: List[str] = []
         for idx, window in enumerate(windows[:6]):
             self.logger.debug(f"  LLM window {idx + 1}/{min(len(windows), 6)}")
-            questions = self._llm_window_extract(window)
+            questions = self._llm_window_extract(window, domain)
             all_questions.extend(questions)
         return all_questions
 
-    def _llm_window_extract(self, text: str) -> List[str]:
+    def _llm_window_extract(self, text: str, domain: str) -> List[str]:
         system_msg = (
-            "You are an expert at extracting survey and questionnaire items from documents. "
-            "You ONLY return questions and form fields that require a response. "
-            "You do NOT include answer choices, instructions, or section headings. "
-            'You respond ONLY with a valid JSON array of strings like: ["Q1", "Q2"]'
+            "You are an expert Document Analyst tasked with extracting questions and actionable inputs. "
+            "You STRICTLY return valid JSON matching this schema: {\"questions\": [\"Q1\", \"Q2\"]} "
+            "You do NOT include answer choices, general instructions, or section headings."
         )
         few_shot = (
-            "Examples of what to extract:\n"
-            '- "How satisfied are you with our service?" → include\n'
-            '- "Please rate your experience on a scale of 1 to 5" → include\n'
-            '- "Full Name:" (form field) → include as "Full Name"\n'
-            '- "Strongly Agree / Disagree" (answer choice) → EXCLUDE\n'
-            '- "Section 1: Demographics" (section header) → EXCLUDE\n\n'
+            f"The document domain is strictly detected as: '{domain}'.\n"
+            "Analyze the nature of the document contextually based on this domain:\n"
+            "- If it implies an Academic Exam/Test/Assessment: Extract ONLY the test questions (e.g. '1. Describe the algorithm'). "
+            "DO NOT extract data table headers (e.g. 'Item1', 'Reg Number') or matrix variables (e.g. 'Time (x)').\n"
+            "- If it implies a Form/Survey: Extract the form inputs or survey items (e.g. 'Email', 'First Name', 'How satisfied are you').\n\n"
         )
         content = self._llm.chat(
             messages=[
@@ -234,23 +231,24 @@ class QuestionExtractionSkill(BaseSkill):
                     "role": "user",
                     "content": (
                         f"{few_shot}"
-                        "Extract ALL questions, survey items, and form fields from the document below.\n"
-                        "Return a JSON array of strings. If none found, return [].\n\n"
+                        "Extract ALL actionable questions, academic problems, survey items, or form fields from the document below.\n"
+                        'Return EXACTLY a JSON object with a single "questions" key containing a list of strings. If none found, return {"questions": []}.\n\n'
                         f"Document:\n{text}\n\n"
-                        "JSON array of questions:"
+                        "JSON Output:"
                     ),
                 },
             ],
             temperature=0.0,
-            max_tokens=1500,
+            max_tokens=2000,
         )
         if not content:
             return []
 
         try:
-            json_match = re.search(r"\[.*?\]", content, re.DOTALL)
+            json_match = re.search(r"\{.*?\"questions\".*?\}", content, re.DOTALL)
             if json_match:
-                candidates = json.loads(json_match.group())
+                obj = json.loads(json_match.group())
+                candidates = obj.get("questions", [])
                 return [str(q).strip() for q in candidates
                         if len(str(q).strip()) >= self._min_len]
         except Exception as exc:
@@ -269,7 +267,6 @@ class QuestionExtractionSkill(BaseSkill):
         return [
             q for q in questions
             if not _P_ANSWER_OPTION.match(q.strip())
-            and not (len(q.split()) <= 3 and not q.endswith("?"))
         ]
 
     def _clean_questions(self, questions: List[str]) -> List[str]:

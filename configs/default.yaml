@@ -14,7 +14,8 @@ app:
 # REQUIRED: Set GROQ_API_KEY as an environment variable.
 groq:
   enabled: true
-  api_key: "PASTE_YOUR_GROQ_API_KEY_HERE"  # Or set GROQ_API_KEY env var
+  api_keys: "PASTE_MULTIPLE_GROQ_API_KEYS_HERE" # Comma separated for fallback
+  api_key: "PASTE_YOUR_GROQ_API_KEY_HERE"  # Single key Or set GROQ_API_KEY env var
   base_url: "https://api.groq.com/openai/v1"
   model: "llama-3.3-70b-versatile"
   timeout_seconds: 180
@@ -26,6 +27,7 @@ pdf:
   ocr_language: "eng"
   extract_tables: true
   max_pages: 500
+  use_gpu: true # For PP-Structure Table Vision
 
 # -- Excel Parsing Settings -------------------------------------
 excel:

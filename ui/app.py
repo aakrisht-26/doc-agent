@@ -63,9 +63,16 @@ _inject_css()
 
 # ── Groq API check ─────────────────────────────────────────────────────────────
 
-def _get_api_key() -> str:
-    """Get API key from environment or config."""
-    return os.environ.get("GROQ_API_KEY") or _cfg.groq.api_key or ""
+def _get_api_keys() -> list[str]:
+    """Get list of API keys from environment or config."""
+    raw_keys = (
+        os.environ.get("GROQ_API_KEYS")
+        or os.environ.get("GROQ_API_KEY")
+        or _cfg.groq.api_keys
+        or _cfg.groq.api_key
+        or ""
+    )
+    return [k.strip() for k in raw_keys.split(",") if k.strip()]
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -81,23 +88,26 @@ def _render_sidebar(cfg) -> dict:
 
         # ── Groq status ──────────────────────────────────────────────
         st.markdown("### 🤖 LLM Engine")
-        key = _get_api_key()
-        has_key = bool(key) and "PASTE" not in key
+        keys = _get_api_keys()
+        has_keys = len(keys) > 0 and "PASTE" not in keys[0]
         
-        if has_key:
+        if has_keys:
+            count = len(keys)
+            status_text = f"● Groq Connected ({count} key{'' if count==1 else 's'})"
             st.markdown(
-                '<span class="llm-status llm-online">● Groq API Connected</span>',
+                f'<span class="llm-status llm-online">{status_text}</span>',
                 unsafe_allow_html=True,
             )
-            # Mask the key for display
-            masked_key = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "****"
-            st.caption(f"API Key: `{masked_key}`")
+            # Mask the first key for display
+            primary = keys[0]
+            masked_key = f"{primary[:4]}...{primary[-4:]}" if len(primary) > 8 else "****"
+            st.caption(f"Primary Key: `{masked_key}`")
         else:
             st.markdown(
                 '<span class="llm-status llm-offline">◉ Groq API Key Missing</span>',
                 unsafe_allow_html=True,
             )
-            st.warning("Please set `GROQ_API_KEY` environment variable.")
+            st.warning("Please set `GROQ_API_KEYS` in your `.env` file.")
 
         st.caption(f"Model: `{cfg.groq.model}`")
 
@@ -211,17 +221,24 @@ def _render_upload() -> list:
 # ── Progress display ───────────────────────────────────────────────────────────
 
 STEP_LABELS = {
-    "parse":             "📖 Parsing document…",
-    "clean":             "🧹 Cleaning and normalising text…",
-    "classify":          "🔍 Classifying document type…",
-    "summarize":         "📝 Generating summary…",
-    "extract_questions": "❓ Extracting questions…",
-    "done":              "✅ Analysis complete",
+    "parse":                 "📖 Parsing document…",
+    "clean":                 "🧹 Cleaning and normalising text…",
+    "classify":              "🔍 Classifying document type (Domain)…",
+    "structure_recognition": "👁️ Running GPU Object Vision (Layouts & Tables)…",
+    "summarize":             "📝 Generating summary…",
+    "extract_questions":     "❓ Extracting questions…",
+    "done":                  "✅ Analysis complete",
 }
 
 
 def _run_pipeline(uploaded_file, overrides: dict):
     from ui.components.results_view import render_results
+
+    # Session caching prevents 30-second pipeline reruns when the user clicks a UI button later
+    state_key = f"doc_result_{uploaded_file.file_id}"
+    if state_key in st.session_state:
+        render_results(st.session_state[state_key], export_cfg=_cfg.export)
+        return
 
     tmp_dir = make_temp_dir()
     try:
@@ -265,6 +282,7 @@ def _run_pipeline(uploaded_file, overrides: dict):
 
         with status_placeholder.container():
             if result.success:
+                st.session_state[state_key] = result  # Cache on success
                 st.success(
                     f"✅ Analysis complete in **{elapsed:.1f}s** — "
                     f"classified as **{result.doc_type.replace('_', ' ').title()}**"

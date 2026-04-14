@@ -130,7 +130,8 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
     story.append(p(
         f"**File:** {result.file_name}   |   "
         f"**Format:** {result.file_type.upper()}   |   "
-        f"**Document Type:** {doc_label}",
+        f"**Document Type:** {doc_label}   |   "
+        f"**Domain:** {result.domain}",
         meta_k, is_md=True
     ))
     story.append(p(
@@ -230,6 +231,61 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
     return buf.getvalue()
 
 
+def generate_filled_pdf(markdown_text: str, margin: float = 0.9) -> bytes:
+    """Generate a clean PDF from unstructured markdown for the Form Filler."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    except ImportError:
+        return markdown_text.encode("utf-8")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        rightMargin=margin * inch, leftMargin=margin * inch,
+        topMargin=margin * inch,  bottomMargin=margin * inch,
+    )
+    
+    sw_s  = getSampleStyleSheet()
+    from reportlab.lib.colors import HexColor
+    body_s  = ParagraphStyle("Body", parent=sw_s["Normal"], fontSize=11, leading=16, spaceAfter=8, textColor=HexColor("#1e1e2e"))
+    h1_s  = ParagraphStyle("H1", parent=sw_s["Heading1"], fontSize=16, leading=20, spaceAfter=8, spaceBefore=12, textColor=HexColor("#1e1e2e"))
+    h2_s  = ParagraphStyle("H2", parent=sw_s["Heading2"], fontSize=14, leading=18, spaceAfter=6, spaceBefore=10, textColor=HexColor("#1e1e2e"))
+    h3_s  = ParagraphStyle("H3", parent=sw_s["Heading3"], fontSize=12, leading=16, spaceAfter=6, spaceBefore=8, textColor=HexColor("#1e1e2e"))
+
+    def md_to_rl(text: str) -> str:
+        safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", safe)
+        safe = re.sub(r"(?<![a-zA-Z0-9])(\*|_)([^\*_]+)\1(?![a-zA-Z0-9])", r"<i>\2</i>", safe)
+        lines = []
+        for line in safe.split("\n"):
+            processed = line.strip()
+            if processed.startswith(("* ", "- ")):
+                processed = f"  &bull;  {processed[2:]}"
+            lines.append(processed)
+        return "<br/>".join(lines)
+
+    story = []
+    for para in markdown_text.split("\n\n"):
+        if not para.strip():
+            continue
+        
+        # Handle markdown headers natively via Style
+        if para.startswith("# "):
+            story.append(Paragraph(md_to_rl(para[2:].strip()), h1_s))
+        elif para.startswith("## "):
+            story.append(Paragraph(md_to_rl(para[3:].strip()), h2_s))
+        elif para.startswith("### "):
+            story.append(Paragraph(md_to_rl(para[4:].strip()), h3_s))
+        else:
+            story.append(Paragraph(md_to_rl(para.strip()), body_s))
+            
+    doc.build(story)
+    return buf.getvalue()
+
+
 # ── Main render function ──────────────────────────────────────────────────────
 
 def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> None:
@@ -246,7 +302,7 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
     <div class="doc-type-banner {css_cls} fade-in">
       <span style="font-size:1.5rem">{icon}</span>
       <div>
-        <div style="font-size:1rem;font-weight:700">{label}</div>
+        <div style="font-size:1rem;font-weight:700">{label} <span style="font-weight:400; color:#cbd5e1; font-size:0.9rem">| Domain: {result.domain}</span></div>
         <div style="font-size:0.78rem;opacity:.75;font-weight:400;margin-top:2px">
           {conf_pct} confidence · {result.classification_method} · {result.summary_method}
         </div>
@@ -348,6 +404,95 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
                   <div class="question-text">{q}</div>
                 </div>""")
             _html("</div>")
+            
+            # --- Dynamic Form Filling Sub-Component ---
+            st.divider()
+            st.markdown("### 📝 Auto-Fill Application Form")
+            st.caption("Provide your answers here. They will be seamlessly injected back into the document framework.")
+            
+            fill_state_key = f"form_fill_{result.file_name}"
+            gen_state_key = f"form_gen_{result.file_name}"
+            
+            # Phase 1: Interactive Flow Form
+            if fill_state_key not in st.session_state:
+                with st.form(key=f"fill_form_{result.file_name}"):
+                    answers = {}
+                    for i, q in enumerate(result.questions, 1):
+                        _html(f"<div style='margin-top:1rem;color:#e2e8f0;font-weight:600;'>{i}. {q}</div>")
+                        answers[q] = st.text_area(f"Answer {i}", key=f"ans_{i}", label_visibility="collapsed")
+                    
+                    if st.form_submit_button("Submit & Generate Document", use_container_width=True):
+                        st.session_state[fill_state_key] = answers
+                        st.rerun()
+            
+            # Phase 2: Processing and Render State
+            else:
+                answers = st.session_state[fill_state_key]
+                st.success("✅ Form Inputs Confirmed")
+                
+                if gen_state_key not in st.session_state:
+                    with st.spinner("Generating Restructured Document via LLM..."):
+                        from skills.form_filling_skill import FormFillingSkill
+                        from core.models import SkillInput
+                        from utils.config import load_config
+                        
+                        cfg = load_config()
+                        skill = FormFillingSkill(config=cfg.to_dict())
+                        out = skill.safe_execute(SkillInput(data={
+                            "raw_text": result.raw_text,
+                            "questions": result.questions,
+                            "user_answers": answers,
+                            "model": cfg.groq.model
+                        }))
+                        if out.success:
+                            st.session_state[gen_state_key] = out.data["filled_markdown"]
+                            st.rerun()
+                        else:
+                            st.error(f"Generation failed: {out.error}")
+                            if st.button("Retry", key="retry_fill"):
+                                del st.session_state[fill_state_key]
+                                st.rerun()
+
+                # Phase 3: Display Results
+                if gen_state_key in st.session_state:
+                    filled_md = st.session_state[gen_state_key]
+                    
+                    st.divider()
+                    st.markdown("#### 📄 Generated File")
+                    
+                    with st.expander("Preview Restructured Text", expanded=True):
+                        st.markdown(filled_md)
+                        
+                    dl_col1, dl_col2 = st.columns(2)
+                    pdf_bytes_ff = generate_filled_pdf(filled_md)
+                    
+                    with dl_col1:
+                        _html('<div class="btn-pdf">')
+                        st.download_button(
+                            label="⬇ Download Restructured Document (PDF)",
+                            data=pdf_bytes_ff,
+                            file_name=f"FILLED_{Path(result.file_name).stem}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                            key="btn_filled_pdf"
+                        )
+                        _html('</div>')
+                    with dl_col2:
+                        _html('<div class="btn-md">')
+                        st.download_button(
+                            label="⬇ Download Restructured Document (Markdown)",
+                            data=filled_md.encode("utf-8"),
+                            file_name=f"FILLED_{Path(result.file_name).stem}.md",
+                            mime="text/markdown",
+                            use_container_width=True,
+                            key="btn_filled_md"
+                        )
+                        _html('</div>')
+                    
+                    if st.button("Reset Form", use_container_width=True):
+                        del st.session_state[fill_state_key]
+                        del st.session_state[gen_state_key]
+                        st.rerun()
         elif result.doc_type == "questionnaire":
             _html("""
             <div class="empty-state">

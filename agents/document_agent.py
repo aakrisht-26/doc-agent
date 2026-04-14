@@ -14,6 +14,7 @@ from core.pipeline_result import PipelineResult
 from skills.document_classifier_skill import DocumentClassifierSkill
 from skills.excel_reader_skill import ExcelReaderSkill
 from skills.pdf_reader_skill import PDFReaderSkill
+from skills.structure_recognition_skill import StructureRecognitionSkill
 from skills.question_extraction_skill import QuestionExtractionSkill
 from skills.summarization_skill import SummarizationSkill
 from skills.text_cleaner_skill import TextCleanerSkill
@@ -50,6 +51,7 @@ class DocumentAgent(BaseAgent):
         groq_skill_cfg: Dict[str, Any] = {
             "groq": {
                 "enabled":         gro.get("enabled", True),
+                "api_keys":        gro.get("api_keys", ""),
                 "api_key":         gro.get("api_key", ""),
                 "base_url":        gro.get("base_url", "https://api.groq.com/openai/v1"),
                 "model":           gro.get("model", "llama-3.3-70b-versatile"),
@@ -62,6 +64,7 @@ class DocumentAgent(BaseAgent):
         self._xls_reader  = ExcelReaderSkill(config=xls)
         self._cleaner     = TextCleanerSkill(config=summ)
         self._classifier  = DocumentClassifierSkill(config={**cls_, **groq_skill_cfg})
+        self._struct_rec  = StructureRecognitionSkill(config=pdf)
         self._summarizer  = SummarizationSkill(config={**summ, **groq_skill_cfg})
         self._q_extractor = QuestionExtractionSkill(config={**q_, **groq_skill_cfg})
 
@@ -114,11 +117,26 @@ class DocumentAgent(BaseAgent):
 
         class_result = classify_out.data if classify_out.success else None
         doc_type     = class_result.doc_type if class_result else "normal_document"
+        domain       = class_result.domain if class_result else "General"
         class_conf   = class_result.confidence if class_result else 0.0
         class_method = class_result.method if class_result else "fallback"
 
+        # ── Step 3.5: Specialized Structure Recognition (Tables) ──────
+        struct_out = self._struct_rec.safe_execute(SkillInput(data={
+            "parsed_document": parsed_doc,
+            "file_path": str(file_path),
+            "domain": domain
+        }))
+        skill_timings["structure_recognition"] = struct_out.duration_ms
+        self._log_step("structure_recognition", struct_out.success, struct_out.duration_ms, struct_out.error)
+
+        if struct_out.success and struct_out.data:
+            parsed_doc = struct_out.data
+            full_text = parsed_doc.full_text  # Update full_text with the new high-fidelity tables
+
+
         # ── Step 4: Summarize ─────────────────────────────────────────
-        summ_out = self._summarizer.safe_execute(SkillInput(data={"full_text": full_text, "doc_type": doc_type}))
+        summ_out = self._summarizer.safe_execute(SkillInput(data={"full_text": full_text, "doc_type": doc_type, "domain": domain}))
         skill_timings["summarize"] = summ_out.duration_ms
         self._log_step("summarize", summ_out.success, summ_out.duration_ms, summ_out.error)
 
@@ -126,7 +144,7 @@ class DocumentAgent(BaseAgent):
         summary_method = summ_out.data.get("method", "none") if (summ_out.success and summ_out.data) else "none"
 
         # ── Step 5: Extract Questions ─────────────────────────────────
-        q_out = self._q_extractor.safe_execute(SkillInput(data={"full_text": full_text, "doc_type": doc_type}))
+        q_out = self._q_extractor.safe_execute(SkillInput(data={"full_text": full_text, "doc_type": doc_type, "domain": domain}))
         skill_timings["extract_questions"] = q_out.duration_ms
         self._log_step("extract_questions", q_out.success, q_out.duration_ms, q_out.error)
 
@@ -139,6 +157,7 @@ class DocumentAgent(BaseAgent):
             file_name=file_path.name,
             file_type=file_type,
             doc_type=doc_type,
+            domain=domain,
             classification_confidence=class_conf,
             classification_method=class_method,
             summary=summary,
@@ -162,6 +181,7 @@ class DocumentAgent(BaseAgent):
             file_name=file_path.name,
             file_type="unknown",
             doc_type="unknown",
+            domain="General",
             classification_confidence=0.0,
             classification_method="none",
             summary="",

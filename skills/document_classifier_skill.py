@@ -136,32 +136,42 @@ class DocumentClassifierSkill(BaseSkill):
 
         confidence = normalized
         method = "heuristic"
+        domain = "General"
 
-        # ── Step 2: LLM disambiguation for borderline cases ────────────
-        # Wider window (0.10-0.70) catches more edge cases
-        if self._llm.available and 0.10 <= normalized <= 0.70:
-            self.logger.info(f"Borderline heuristic score — consulting LLM ({self._llm.provider_label}) for classification.")
-            llm_result = self._llm_classify(full_text[:2500])
+        # ── Step 2: LLM Domain Detection & Disambiguation ──────────────
+        if self._llm.available:
+            self.logger.info(f"Consulting LLM ({self._llm.provider_label}) for domain & classification.")
+            llm_result = self._llm_classify(full_text[:3000])
             if llm_result is not None:
-                llm_score, _ = llm_result
-                confidence = 0.6 * llm_score + 0.4 * normalized
-                method = f"hybrid_{self._llm.provider}"
-                signals["llm_score"] = round(llm_score, 3)
-                self.logger.info(
-                    f"LLM ({self._llm.provider_label}) score: {llm_score:.3f} → blended: {confidence:.3f}"
-                )
+                llm_score, _, detected_domain = llm_result
+                domain = detected_domain
+                signals["domain"] = domain
+                
+                # Blend structural score unless heuristics are overwhelmingly certain (> 0.85)
+                # This ensures simple forms that score very low on heuristics are rescued by the LLM.
+                if normalized < 0.85:
+                    # Heavy weight to the LLM (70%) to catch nuanced real-world forms
+                    confidence = 0.7 * llm_score + 0.3 * normalized
+                    method = f"hybrid_{self._llm.provider}"
+                    signals["llm_score"] = round(llm_score, 3)
+                    self.logger.info(
+                        f"Blended score: {confidence:.3f} (LLM {llm_score:.2f}) | Domain: {domain}"
+                    )
+                else:
+                    self.logger.info(f"Domain detected: {domain} (Heuristic dominating: {normalized:.3f})")
 
         doc_type = "questionnaire" if confidence >= self._threshold else "normal_document"
         signals["final_score"] = round(confidence, 4)
 
         result = ClassificationResult(
             doc_type=doc_type,
+            domain=domain,
             confidence=round(confidence, 4),
             method=method,
             signals=signals,
         )
         self.logger.info(
-            f"Classification: {doc_type} ({confidence:.0%} confidence, method={method})"
+            f"Classification: {doc_type} | Domain: {domain} ({confidence:.0%} confidence, method={method})"
         )
         return SkillOutput(
             success=True,
@@ -195,25 +205,24 @@ class DocumentClassifierSkill(BaseSkill):
 
     # ── LLM engine ────────────────────────────────────────────────────
 
-    def _llm_classify(self, text_snippet: str) -> Optional[Tuple[float, str]]:
+    def _llm_classify(self, text_snippet: str) -> Optional[Tuple[float, str, str]]:
         """
-        Ask LLM to classify the document snippet.
-        Returns (score, method) where score is P(questionnaire) in [0, 1].
+        Ask LLM to classify the document structure and semantic domain.
+        Returns (score, method, domain) where score is P(questionnaire) in [0, 1].
         """
         content = self._llm.chat(
             messages=[{
                 "role": "user",
                 "content": (
-                    "You are a document classifier. Classify the following document.\n"
+                    "You are an expert document classifier. Classify the following document structurally, "
+                    "and identify its semantic domain (e.g. Financial, Environmental, Healthcare, Legal, Technical, Generic).\n"
                     "Respond with ONLY a valid JSON object — nothing else. Format:\n"
-                    '{"type": "questionnaire", "confidence": 0.92}\n'
-                    "  OR\n"
-                    '{"type": "normal_document", "confidence": 0.87}\n\n'
+                    '{"type": "questionnaire|normal_document", "confidence": 0.92, "domain": "Financial"}\n\n'
                     f"Document:\n{text_snippet}\n\nClassification JSON:"
                 ),
             }],
             temperature=0.0,
-            max_tokens=60,
+            max_tokens=80,
         )
         if not content:
             return None
@@ -226,8 +235,9 @@ class DocumentClassifierSkill(BaseSkill):
             obj  = json.loads(json_match.group())
             typ  = obj.get("type", "normal_document")
             conf = float(obj.get("confidence", 0.5))
+            domain = str(obj.get("domain", "General")).strip()
             p_q  = conf if typ == "questionnaire" else (1.0 - conf)
-            return p_q, "llm"
+            return p_q, "llm", domain
         except Exception as exc:
             self.logger.warning(f"LLM classification parse failed: {exc}")
             return None

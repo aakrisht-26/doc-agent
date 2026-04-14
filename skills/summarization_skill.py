@@ -82,6 +82,7 @@ class SummarizationSkill(BaseSkill):
         start    = time.monotonic()
         full_text: str = inputs.data["full_text"]
         doc_type: str  = inputs.data.get("doc_type", "normal_document")
+        domain: str    = inputs.data.get("domain", "General")
 
         if not full_text.strip():
             return SkillOutput(
@@ -94,7 +95,7 @@ class SummarizationSkill(BaseSkill):
         section_names = [s[0] for s in sections]
 
         if self._llm.available:
-            result = self._summarize_llm(full_text, doc_type, sections)
+            result = self._summarize_llm(full_text, doc_type, domain, sections)
             if result:
                 summary, method = result
                 self.logger.info(
@@ -163,19 +164,20 @@ class SummarizationSkill(BaseSkill):
         self,
         full_text: str,
         doc_type: str,
+        domain: str,
         sections: List[Tuple[str, str]],
     ) -> Optional[Tuple[str, str]]:
         chunks = self._section_aware_chunks(full_text, sections)
-        self.logger.info(f"Summarizing {len(chunks)} chunk(s) — {self._llm.provider_label}")
+        self.logger.info(f"Summarizing {len(chunks)} chunk(s) — {self._llm.provider_label} (Domain: {domain})")
 
         if len(chunks) == 1:
-            result = self._call_single(chunks[0], doc_type, sections)
+            result = self._call_single(chunks[0], doc_type, domain, sections)
             return (result, f"llm_single_{self._llm.provider}") if result else None
 
         chunk_summaries: List[str] = []
         for idx, chunk in enumerate(chunks, 1):
             self.logger.debug(f"  Map chunk {idx}/{len(chunks)}")
-            s = self._call_map(chunk)
+            s = self._call_map(chunk, domain)
             if s:
                 chunk_summaries.append(s)
 
@@ -183,13 +185,14 @@ class SummarizationSkill(BaseSkill):
             return None
 
         combined = "\n\n---\n\n".join(chunk_summaries)
-        final    = self._call_reduce(combined, doc_type, sections)
+        final    = self._call_reduce(combined, doc_type, domain, sections)
         return (final, f"llm_map_reduce_{self._llm.provider}") if final else None
 
     def _call_single(
         self,
         text: str,
         doc_type: str,
+        domain: str,
         sections: List[Tuple[str, str]],
     ) -> Optional[str]:
         doc_label    = doc_type.replace("_", " ")
@@ -203,47 +206,41 @@ class SummarizationSkill(BaseSkill):
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional document analyst. "
-                        "You produce clear, detailed, well-structured summaries. "
-                        "Always follow the requested output format exactly."
+                        f"You are a Senior {domain} Analyst. "
+                        "You produce production-grade, highly professional, and domain-specific analysis reports. "
+                        "Never invent information — only use what is provided."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        f"Analyze the following {doc_label} and produce a comprehensive summary."
+                        f"Analyze the following {doc_label} from the perspective of an expert {domain} analyst.\n"
                         f"{section_hint}\n\n"
                         "IMPORTANT: If this is a dataset (CSV/Excel), ensure you summarize info across ALL categories or groups found "
-                        "(e.g., all cities, all departments), not just the first few. Identify trends or commonalities.\n\n"
-                        "Use EXACTLY this output structure (keep the bold headings):\n\n"
-                        "**Document Purpose**\n"
-                        "[2-3 sentences: what is this document, its scope, and context]\n\n"
-                        "**Key Sections & Topics**\n"
-                        "[Identify the main themes or data categories covered in the document]\n\n"
-                        "**Important Details & Findings**\n"
-                        "[Bullet list — specific facts, figures, averages, ranges, names, dates. "
-                        "If it's a dataset, include key stats across different representative groups.]\n\n"
-                        "**Conclusions & Takeaways**\n"
-                        "[2-3 sentences: main conclusions, trends, or recommendations]\n\n"
+                        "(e.g., all cities, all departments), identifying overall trends and outliers.\n\n"
+                        f"Structure your report dynamically based on industry standards for {domain} analysis. "
+                        "Use Markdown headings (e.g. Executive Summary, Data & Methodology, Domain-Specific Details, Conclusions). "
+                        "Do NOT just use a generic 'Document Purpose' heading; use headings appropriate for a professional "
+                        f"{domain} report.\n\n"
                         f"Document:\n\n{text}\n\n"
-                        "Summary:"
+                        "Analysis Report:"
                     ),
                 },
             ],
             max_tokens=self._max_tokens,
         )
 
-    def _call_map(self, chunk: str) -> Optional[str]:
+    def _call_map(self, chunk: str, domain: str) -> Optional[str]:
         return self._llm.chat(
             messages=[{
                 "role": "user",
                 "content": (
-                    "Extract the key information from this document section as a concise bullet list.\n"
-                    "Include: main topics, specific facts/figures/dates, important names or entities, "
-                    "and any decisions or conclusions.\n"
+                    f"You are an expert {domain} Analyst extracting data from a document section.\n"
+                    "Extract the most critical metrics, data points, trends, and facts relevant to your domain.\n"
+                    "Include: specific facts/figures/dates, important entities, outliers, or decisions.\n"
                     "Be specific — do not paraphrase vaguely. Preserve numbers and proper nouns.\n\n"
                     f"Section:\n{chunk}\n\n"
-                    "Key facts (bullet list):"
+                    "Extracted Facts (bullet list):"
                 ),
             }],
             temperature=0.1,
@@ -254,6 +251,7 @@ class SummarizationSkill(BaseSkill):
         self,
         combined_bullets: str,
         doc_type: str,
+        domain: str,
         sections: List[Tuple[str, str]],
     ) -> Optional[str]:
         doc_label = doc_type.replace("_", " ")
@@ -262,8 +260,8 @@ class SummarizationSkill(BaseSkill):
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional document analyst. "
-                        "Synthesize extracted facts into a clear, structured summary. "
+                        f"You are a Senior {domain} Analyst. "
+                        "Synthesize extracted data into a production-grade, domain-specific analysis report. "
                         "Never invent information — only use what is provided."
                     ),
                 },
@@ -271,19 +269,14 @@ class SummarizationSkill(BaseSkill):
                     "role": "user",
                     "content": (
                         f"Below are key facts extracted from sections of a {doc_label}.\n"
-                        "Synthesize them into a comprehensive summary. Ensure you cover the BREADTH of information — "
-                        "if different chunks focused on different groups (e.g., cities, dates), include all of them.\n\n"
-                        "Use EXACTLY this structure:\n\n"
-                        "**Document Purpose**\n"
-                        "[Context about the document and its content]\n\n"
-                        "**Key Sections & Topics**\n"
-                        "[Main categories or themes identified across all data]\n\n"
-                        "**Important Details & Findings**\n"
-                        "[Synthesized bullet list of the most critical facts and figures across the entire dataset]\n\n"
-                        "**Conclusions & Takeaways**\n"
-                        "[Overarching summary of conclusions or interesting trends]\n\n"
+                        f"Synthesize them into a highly professional {domain} analysis report. "
+                        "Ensure you cover the BREADTH of information — if different chunks focused on different groups "
+                        "(e.g., cities, dates, entities), include all of them to highlight overall trends and comparisons.\n\n"
+                        f"Structure the report dynamically based on industry standards for {domain} analysis. "
+                        "Use clean Markdown headings (e.g., Executive Summary, Domain-Specific Analysis Elements, Trends & Outliers, Strategic Takeaways). "
+                        "Do not use generic structures; make it read like a premium report from a top consultancy.\n\n"
                         f"Extracted facts:\n\n{combined_bullets}\n\n"
-                        "Final Summary:"
+                        "Final Analysis Report:"
                     ),
                 },
             ],

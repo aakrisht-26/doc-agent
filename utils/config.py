@@ -1,3 +1,14 @@
+"""
+Configuration management for DocAgent.
+
+Environment Variable Overrides (all optional):
+    DOCAGENT_MAX_FILE_MB    : int
+    GROQ_API_KEY            : str  (Groq API Key)
+    DOCAGENT_GROQ_MODEL     : str  (e.g. llama-3.3-70b-versatile)
+"""
+
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +28,8 @@ _CONFIG_CACHE: Optional[AppConfig] = None
 class GroqConfig:
     """Settings for the Groq Cloud API."""
     enabled: bool = True
-    api_key: str = ""
+    api_keys: str = ""
+    api_key: str = "" # Keep for backward compatibility
     base_url: str = "https://api.groq.com/openai/v1"
     model: str = "llama-3.3-70b-versatile"
     timeout_seconds: int = 180
@@ -85,6 +97,7 @@ class AppConfig:
         return {
             "groq": {
                 "enabled": self.groq.enabled,
+                "api_keys": self.groq.api_keys,
                 "api_key": self.groq.api_key,
                 "base_url": self.groq.base_url,
                 "model": self.groq.model,
@@ -152,6 +165,7 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
         log_file        = os.getenv("DOCAGENT_LOG_FILE", app_r.get("log_file", "logs/docagent.log")),
         groq=GroqConfig(
             enabled        = _env_bool("DOCAGENT_GROQ_ENABLED", gro_r.get("enabled", True)),
+            api_keys       = os.getenv("GROQ_API_KEYS", gro_r.get("api_keys", "")),
             api_key        = os.getenv("GROQ_API_KEY", gro_r.get("api_key", "")),
             base_url       = os.getenv("DOCAGENT_GROQ_URL", gro_r.get("base_url", "https://api.groq.com/openai/v1")),
             model          = os.getenv("DOCAGENT_GROQ_MODEL", gro_r.get("model", "llama-3.3-70b-versatile")),

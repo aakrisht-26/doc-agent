@@ -31,6 +31,7 @@ class PipelineResult:
 
     # ── Classification ────────────────────────────────────────────────────
     doc_type: str                       # "questionnaire" | "normal_document"
+    domain: str                         # e.g., "Financial", "Environmental", "General"
     classification_confidence: float    # 0.0 – 1.0
     classification_method: str          # "heuristic" | "llm" | "hybrid"
 
@@ -69,7 +70,7 @@ class PipelineResult:
             "# DocAgent — Analysis Report",
             "",
             f"> **File:** `{self.file_name}`  ",
-            f"> **Format:** {self.file_type.upper()}  |  **Document Type:** {doc_label}  ",
+            f"> **Format:** {self.file_type.upper()}  |  **Document Type:** {doc_label}  |  **Domain:** {self.domain}  ",
             f"> **Classification:** {conf_pct} confidence via *{self.classification_method}*  ",
             f"> **Words:** {self.word_count:,}  |  **Pages / Sheets:** {self.page_count}  ",
             f"> **Processing time:** {self.processing_time_ms / 1000:.2f}s",
@@ -146,6 +147,7 @@ class PipelineResult:
             "file_name": self.file_name,
             "file_type": self.file_type,
             "doc_type": self.doc_type,
+            "domain": self.domain,
             "classification_confidence": self.classification_confidence,
             "classification_method": self.classification_method,
             "summary": self.summary,
