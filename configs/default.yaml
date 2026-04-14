@@ -1,0 +1,57 @@
+# ============================================================
+# DocAgent -- Default Configuration (Groq-only)
+# All values can be overridden via environment variables.
+# ============================================================
+
+app:
+  name: "DocAgent"
+  version: "1.0.0"
+  max_file_size_mb: 50
+  log_level: "INFO"
+  log_file: "logs/docagent.log"
+
+# -- Groq Cloud API Settings ------------------------------------
+# REQUIRED: Set GROQ_API_KEY as an environment variable.
+groq:
+  enabled: true
+  api_key: "PASTE_YOUR_GROQ_API_KEY_HERE"  # Or set GROQ_API_KEY env var
+  base_url: "https://api.groq.com/openai/v1"
+  model: "llama-3.3-70b-versatile"
+  timeout_seconds: 180
+  temperature: 0.15
+
+# -- PDF Parsing Settings ---------------------------------------
+pdf:
+  use_ocr_fallback: true
+  ocr_language: "eng"
+  extract_tables: true
+  max_pages: 500
+
+# -- Excel Parsing Settings -------------------------------------
+excel:
+  max_sheets: 50
+  include_formulas: false
+  max_rows_per_sheet: 10000
+
+# -- Summarization Settings ------------------------------------
+summarization:
+  chunk_size: 4000
+  chunk_overlap: 300
+  max_summary_length: 3000
+  extractive_sentences: 15
+
+# -- Classification Settings ------------------------------------
+classification:
+  questionnaire_threshold: 0.35
+
+# -- Question Extraction Settings -------------------------------
+question_extraction:
+  min_questions: 1
+  dedup: true
+  max_questions: 200
+  llm_threshold: 0
+
+# -- Export / Download Settings ---------------------------------
+export:
+  pdf_font_size: 11
+  pdf_margin_inch: 0.9
