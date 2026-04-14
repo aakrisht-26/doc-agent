@@ -42,14 +42,18 @@ class StructureRecognitionSkill(BaseSkill):
         if self._engine is None:
             self.logger.info(f"Loading PaddleOCR PP-Structure Engine (GPU={self._use_gpu})...")
             try:
-                from paddleocr import PPStructure
+                import os
+                # Disable network health checks for fast GPU booting
+                os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+                
+                from paddleocr import PPStructureV3
                 # Disable warning logs from paddle
                 import logging
                 logging.getLogger("ppocr").setLevel(logging.ERROR)
             except ImportError as e:
                 self.logger.error("PaddleOCR is not installed. Run `pip install paddleocr paddlepaddle-gpu`")
                 raise e
-            self._engine = PPStructure(show_log=self._show_log, use_gpu=self._use_gpu, lang="en")
+            self._engine = PPStructureV3(show_log=self._show_log, use_gpu=self._use_gpu, lang="en")
         return self._engine
 
     def execute(self, inputs: SkillInput) -> SkillOutput:
