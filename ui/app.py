@@ -30,7 +30,7 @@ import streamlit as st
 # ── Page config (must be first Streamlit call) ─────────────────────────────────
 st.set_page_config(
     page_title="DocAgent — AI Document Analyzer",
-    page_icon="🤖",
+    page_icon="📜",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
@@ -82,12 +82,12 @@ def _render_sidebar(cfg) -> dict:
     overrides: dict = {}
 
     with st.sidebar:
-        st.markdown("## ⚙️ DocAgent")
+        st.markdown("## DocAgent")
         st.caption(f"v{cfg.version} · Groq Cloud Powered")
         st.divider()
 
         # ── Groq status ──────────────────────────────────────────────
-        st.markdown("### 🤖 LLM Engine")
+        st.markdown("### LLM Engine")
         keys = _get_api_keys()
         has_keys = len(keys) > 0 and "PASTE" not in keys[0]
         
@@ -122,7 +122,7 @@ def _render_sidebar(cfg) -> dict:
         st.divider()
 
         # ── PDF settings ───────────────────────────────────────────────
-        st.markdown("### 📄 PDF Settings")
+        st.markdown("### PDF Settings")
         use_ocr = st.toggle(
             "Enable OCR (for scanned PDFs)",
             value=cfg.pdf.use_ocr_fallback,
@@ -140,7 +140,7 @@ def _render_sidebar(cfg) -> dict:
         st.divider()
 
         # ── Processing settings ────────────────────────────────────────
-        st.markdown("### 🔧 Processing")
+        st.markdown("### Processing")
         q_threshold = st.slider(
             "Questionnaire threshold",
             min_value=0.1, max_value=0.9, value=cfg.classification.questionnaire_threshold,
@@ -159,7 +159,7 @@ def _render_sidebar(cfg) -> dict:
         st.divider()
 
         # ── Info ───────────────────────────────────────────────────────
-        st.markdown("### 📊 Pipeline")
+        st.markdown("### Pipeline")
         st.caption(
             "**Parse** → **Clean** → **Classify** → **Summarize** → **Extract**"
         )
@@ -194,7 +194,7 @@ def _get_agent(model: str, q_threshold: float, chunk_size: int,
 def _render_header() -> None:
     st.markdown("""
     <div class="hero-header fade-in">
-      <h1 class="hero-title">🤖 DocAgent</h1>
+      <h1 class="hero-title" style='font-family: "VT323", monospace;'>DocAgent</h1>
       <p class="hero-subtitle">
         Intelligent Document Analysis powered by Groq Cloud
       </p>
@@ -221,13 +221,13 @@ def _render_upload() -> list:
 # ── Progress display ───────────────────────────────────────────────────────────
 
 STEP_LABELS = {
-    "parse":                 "📖 Parsing document…",
-    "clean":                 "🧹 Cleaning and normalising text…",
-    "classify":              "🔍 Classifying document type (Domain)…",
-    "structure_recognition": "👁️ Running GPU Object Vision (Layouts & Tables)…",
-    "summarize":             "📝 Generating summary…",
-    "extract_questions":     "❓ Extracting questions…",
-    "done":                  "✅ Analysis complete",
+    "parse":                 " Parsing document…",
+    "clean":                 " Cleaning and normalising text…",
+    "classify":              " Classifying document type (Domain)…",
+    "structure_recognition": " Running GPU Object Vision (Layouts & Tables)…",
+    "summarize":             " Generating summary…",
+    "extract_questions":     " Extracting questions…",
+    "done":                  " Analysis complete",
 }
 
 
@@ -245,7 +245,7 @@ def _run_pipeline(uploaded_file, overrides: dict):
         file_path = save_upload(uploaded_file.getvalue(), uploaded_file.name, tmp_dir)
         err = validate_file(file_path, max_size_mb=_cfg.max_file_size_mb)
         if err:
-            st.error(f"❌ {err}")
+            st.error(f"{err}")
             return
 
         agent = _get_agent(
@@ -277,18 +277,18 @@ def _run_pipeline(uploaded_file, overrides: dict):
         agent._log_step = _progress_log_step  # type: ignore[method-assign]
         result = agent.run(file_path)
 
-        bar.progress(1.0, text="✅ Complete!")
+        bar.progress(1.0, text="Complete!")
         elapsed = time.monotonic() - start_ts
 
         with status_placeholder.container():
             if result.success:
                 st.session_state[state_key] = result  # Cache on success
                 st.success(
-                    f"✅ Analysis complete in **{elapsed:.1f}s** — "
+                    f"Analysis complete in **{elapsed:.1f}s** — "
                     f"classified as **{result.doc_type.replace('_', ' ').title()}**"
                 )
             else:
-                st.error(f"⚠️ Pipeline finished with errors.")
+                st.error(f"Pipeline finished with errors.")
 
         render_results(result, export_cfg=_cfg.export)
 
