@@ -373,7 +373,7 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
     st.divider()
 
     # ── Tabs ───────────────────────────────────────────────────────────
-    tab_labels = ["📋 Summary", "❓ Questions", "📄 Raw Text", "ℹ️ Metadata"]
+    tab_labels = ["📋 Summary", "❓ Questions", "📄 Raw Text", "ℹ️ Metadata", "💬 Chat"]
     tabs = st.tabs(tab_labels)
 
     # ── Tab 1: Summary ─────────────────────────────────────────────────
@@ -382,6 +382,18 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
             method_label = result.summary_method.replace("_", " ").title()
             _html(f'<span class="badge badge-purple" style="margin-bottom:.75rem">⚡ {method_label}</span>')
             _html(f'<div class="summary-text fade-in">{result.summary}</div>')
+            
+            # TTS Action
+            if st.button("🔊 Read Summary Aloud", key=f"tts_{result.file_name}"):
+                with st.spinner("Generating High-Quality Audio..."):
+                    from skills.tts_skill import TTSSkill
+                    from core.models import SkillInput
+                    tts = TTSSkill()
+                    tts_out = tts.safe_execute(SkillInput(data={"text": result.summary}))
+                    if tts_out.success:
+                        st.audio(tts_out.data["audio_bytes"], format="audio/mp3")
+                    else:
+                        st.error(tts_out.error)
         else:
             _html("""
             <div class="empty-state">
@@ -531,6 +543,56 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
     # ── Tab 4: Metadata ────────────────────────────────────────────────
     with tabs[3]:
         _render_metadata(result)
+
+    # ── Tab 5: Chat (RAG) ──────────────────────────────────────────────
+    with tabs[4]:
+        st.markdown("### 💬 Chat with Document")
+        st.caption("Ask specific questions and the AI will scan the text using local embeddings.")
+        
+        chat_key = f"rag_history_{result.file_name}"
+        if chat_key not in st.session_state:
+            st.session_state[chat_key] = []
+            
+        for msg in st.session_state[chat_key]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                
+        if q := st.chat_input("Ask a question...", key=f"chat_{result.file_name}"):
+            st.session_state[chat_key].append({"role": "user", "content": q})
+            with st.chat_message("user"):
+                st.markdown(q)
+                
+            with st.chat_message("assistant"):
+                with st.spinner("Scanning document..."):
+                    from skills.rag_skill import RagSkill
+                    from utils.config import load_config
+                    from core.models import SkillInput
+                    
+                    rag_key = f"rag_skill_{result.file_name}"
+                    if rag_key not in st.session_state:
+                        cfg = load_config()
+                        from utils.llm_client import LLMClient
+                        groq_cfg = {"groq": {"api_keys": cfg.groq.api_keys, "model": cfg.groq.model}}
+                        st.session_state[rag_key] = RagSkill(config=groq_cfg)
+                        
+                    skill = st.session_state[rag_key]
+                    out = skill.safe_execute(SkillInput(data={
+                        "full_text": result.raw_text,
+                        "query": q,
+                        "chat_history": st.session_state[chat_key][:-1]
+                    }))
+                    
+                    if out.success:
+                        ans = out.data["answer"]
+                        chunks = out.data.get("context_chunks", [])
+                        st.markdown(ans)
+                        if chunks:
+                            with st.expander("Show retrieved context"):
+                                for i, c in enumerate(chunks):
+                                    st.caption(f"**Chunk {i+1}**:\n{c[:300]}...")
+                        st.session_state[chat_key].append({"role": "assistant", "content": ans})
+                    else:
+                        st.error(f"Generation failed: {out.error}")
 
 
 def _render_metadata(result: PipelineResult) -> None:

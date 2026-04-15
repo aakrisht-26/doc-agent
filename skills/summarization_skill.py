@@ -83,6 +83,24 @@ class SummarizationSkill(BaseSkill):
         full_text: str = inputs.data["full_text"]
         doc_type: str  = inputs.data.get("doc_type", "normal_document")
         domain: str    = inputs.data.get("domain", "General")
+        
+        # UX Controls
+        length: str  = inputs.data.get("summary_length", "medium")
+        level: str   = inputs.data.get("technical_level", "intermediate")
+        page_from: int = int(inputs.data.get("page_from", 0))
+        page_to: int   = int(inputs.data.get("page_to", 0))
+        
+        # Page-range filtering: filter chunks before summarizing
+        parsed_doc = inputs.data.get("parsed_document")
+        if parsed_doc and (page_from > 0 or page_to > 0):
+            selected_chunks = [
+                c for c in parsed_doc.chunks
+                if (page_from == 0 or int(c.page_or_sheet) >= page_from)
+                and (page_to == 0 or int(c.page_or_sheet) <= page_to)
+            ]
+            if selected_chunks:
+                full_text = "\n\n".join(c.text for c in selected_chunks)
+                self.logger.info(f"Page range filter: pages {page_from}-{page_to}, {len(selected_chunks)} chunks")
 
         if not full_text.strip():
             return SkillOutput(
@@ -95,7 +113,7 @@ class SummarizationSkill(BaseSkill):
         section_names = [s[0] for s in sections]
 
         if self._llm.available:
-            result = self._summarize_llm(full_text, doc_type, domain, sections)
+            result = self._summarize_llm(full_text, doc_type, domain, sections, length, level, parsed_doc)
             if result:
                 summary, method = result
                 self.logger.info(
@@ -166,18 +184,27 @@ class SummarizationSkill(BaseSkill):
         doc_type: str,
         domain: str,
         sections: List[Tuple[str, str]],
+        length: str = "medium",
+        level: str = "intermediate",
+        parsed_doc=None,
     ) -> Optional[Tuple[str, str]]:
         chunks = self._section_aware_chunks(full_text, sections)
         self.logger.info(f"Summarizing {len(chunks)} chunk(s) — {self._llm.provider_label} (Domain: {domain})")
+        
+        # Build page-tagged chunks for source attribution
+        if parsed_doc and hasattr(parsed_doc, 'chunks') and len(parsed_doc.chunks) == len(chunks):
+            page_tags = [f"[Page {c.page_or_sheet}]" for c in parsed_doc.chunks]
+        else:
+            page_tags = [f"[Chunk {i+1}]" for i in range(len(chunks))]
 
         if len(chunks) == 1:
-            result = self._call_single(chunks[0], doc_type, domain, sections)
+            result = self._call_single(chunks[0], doc_type, domain, sections, length, level)
             return (result, f"llm_single_{self._llm.provider}") if result else None
 
         chunk_summaries: List[str] = []
-        for idx, chunk in enumerate(chunks, 1):
+        for idx, (chunk, tag) in enumerate(zip(chunks, page_tags), 1):
             self.logger.debug(f"  Map chunk {idx}/{len(chunks)}")
-            s = self._call_map(chunk, domain)
+            s = self._call_map(chunk, domain, tag)
             if s:
                 chunk_summaries.append(s)
 
@@ -185,7 +212,7 @@ class SummarizationSkill(BaseSkill):
             return None
 
         combined = "\n\n---\n\n".join(chunk_summaries)
-        final    = self._call_reduce(combined, doc_type, domain, sections)
+        final    = self._call_reduce(combined, doc_type, domain, sections, length, level)
         return (final, f"llm_map_reduce_{self._llm.provider}") if final else None
 
     def _call_single(
@@ -194,12 +221,23 @@ class SummarizationSkill(BaseSkill):
         doc_type: str,
         domain: str,
         sections: List[Tuple[str, str]],
+        length: str = "medium",
+        level: str = "intermediate",
     ) -> Optional[str]:
         doc_label    = doc_type.replace("_", " ")
         section_hint = ""
         if sections:
             names = ", ".join(f'"{s[0]}"' for s in sections[:8])
             section_hint = f"\nDetected sections: {names}"
+        
+        length_map = {"short": "2-3 paragraphs", "medium": "4-6 paragraphs", "detailed": "8+ paragraphs with all details"}
+        level_map = {
+            "beginner": "Use plain English. Avoid jargon. Explain technical terms when used.",
+            "intermediate": "Use standard domain terminology. Assume moderate familiarity.",
+            "expert": "Use precise domain terminology. Include technical depth and nuanced analysis."
+        }
+        length_instr = length_map.get(length, length_map["medium"])
+        level_instr = level_map.get(level, level_map["intermediate"])
 
         return self._llm.chat(
             messages=[
@@ -216,12 +254,12 @@ class SummarizationSkill(BaseSkill):
                     "content": (
                         f"Analyze the following {doc_label} from the perspective of an expert {domain} analyst.\n"
                         f"{section_hint}\n\n"
+                        f"LENGTH: {length_instr}\n"
+                        f"AUDIENCE: {level_instr}\n\n"
                         "IMPORTANT: If this is a dataset (CSV/Excel), ensure you summarize info across ALL categories or groups found "
                         "(e.g., all cities, all departments), identifying overall trends and outliers.\n\n"
                         f"Structure your report dynamically based on industry standards for {domain} analysis. "
-                        "Use Markdown headings (e.g. Executive Summary, Data & Methodology, Domain-Specific Details, Conclusions). "
-                        "Do NOT just use a generic 'Document Purpose' heading; use headings appropriate for a professional "
-                        f"{domain} report.\n\n"
+                        "Use Markdown headings. At the end of each key claim or data point, add a source reference like [Source: Page N] where N is the approximate page number.\n\n"
                         f"Document:\n\n{text}\n\n"
                         "Analysis Report:"
                     ),
@@ -230,17 +268,19 @@ class SummarizationSkill(BaseSkill):
             max_tokens=self._max_tokens,
         )
 
-    def _call_map(self, chunk: str, domain: str) -> Optional[str]:
+    def _call_map(self, chunk: str, domain: str, page_tag: str = "") -> Optional[str]:
+        tag_note = f" (from {page_tag})" if page_tag else ""
         return self._llm.chat(
             messages=[{
                 "role": "user",
                 "content": (
-                    f"You are an expert {domain} Analyst extracting data from a document section.\n"
+                    f"You are an expert {domain} Analyst extracting data from a document section{tag_note}.\n"
                     "Extract the most critical metrics, data points, trends, and facts relevant to your domain.\n"
                     "Include: specific facts/figures/dates, important entities, outliers, or decisions.\n"
-                    "Be specific — do not paraphrase vaguely. Preserve numbers and proper nouns.\n\n"
+                    f"Be specific — do not paraphrase vaguely. Preserve numbers and proper nouns.\n"
+                    f"After each key fact, append a source reference in parentheses like ({page_tag}) so the reader knows the origin.\n\n"
                     f"Section:\n{chunk}\n\n"
-                    "Extracted Facts (bullet list):"
+                    "Extracted Facts (bullet list with source references):"
                 ),
             }],
             temperature=0.1,
@@ -253,8 +293,18 @@ class SummarizationSkill(BaseSkill):
         doc_type: str,
         domain: str,
         sections: List[Tuple[str, str]],
+        length: str = "medium",
+        level: str = "intermediate",
     ) -> Optional[str]:
         doc_label = doc_type.replace("_", " ")
+        length_map = {"short": "2-3 paragraphs", "medium": "4-6 paragraphs", "detailed": "8+ paragraphs with all details"}
+        level_map = {
+            "beginner": "Use plain English. Avoid jargon. Explain technical terms when used.",
+            "intermediate": "Use standard domain terminology. Assume moderate familiarity.",
+            "expert": "Use precise terminology. Include technical depth and nuanced analysis."
+        }
+        length_instr = length_map.get(length, length_map["medium"])
+        level_instr = level_map.get(level, level_map["intermediate"])
         return self._llm.chat(
             messages=[
                 {
@@ -262,6 +312,7 @@ class SummarizationSkill(BaseSkill):
                     "content": (
                         f"You are a Senior {domain} Analyst. "
                         "Synthesize extracted data into a production-grade, domain-specific analysis report. "
+                        "Preserve all source references in the format (Page N) or [Source: Page N] from the extracted facts. "
                         "Never invent information — only use what is provided."
                     ),
                 },
@@ -269,12 +320,13 @@ class SummarizationSkill(BaseSkill):
                     "role": "user",
                     "content": (
                         f"Below are key facts extracted from sections of a {doc_label}.\n"
+                        f"LENGTH: {length_instr}\n"
+                        f"AUDIENCE: {level_instr}\n\n"
                         f"Synthesize them into a highly professional {domain} analysis report. "
                         "Ensure you cover the BREADTH of information — if different chunks focused on different groups "
                         "(e.g., cities, dates, entities), include all of them to highlight overall trends and comparisons.\n\n"
                         f"Structure the report dynamically based on industry standards for {domain} analysis. "
-                        "Use clean Markdown headings (e.g., Executive Summary, Domain-Specific Analysis Elements, Trends & Outliers, Strategic Takeaways). "
-                        "Do not use generic structures; make it read like a premium report from a top consultancy.\n\n"
+                        "Use clean Markdown headings. Where you refer to facts from specific pages, include source tags like [Source: Page N].\n\n"
                         f"Extracted facts:\n\n{combined_bullets}\n\n"
                         "Final Analysis Report:"
                     ),

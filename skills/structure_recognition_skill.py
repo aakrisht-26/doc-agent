@@ -20,10 +20,6 @@ class StructureRecognitionSkill(BaseSkill):
     """
     Identifies and extracts highly complex tables from given PDFs using PaddleOCR's PPStructure.
     Only intended to be used on domains that heavily feature tables (Technical, Scientific, Financial).
-    
-    Config keys:
-        use_gpu (bool): Whether to use GPU acceleration (default: True).
-        show_log (bool): Print paddle logs (default: False).
     """
 
     name = "structure_recognition"
@@ -32,123 +28,84 @@ class StructureRecognitionSkill(BaseSkill):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(config)
-        self._use_gpu = self.get_config("use_gpu", True)
+        # Note: GPU mode is disabled — paddlepaddle-gpu conflicts with PyTorch CUDA DLLs.
+        # CPU inference is used via a subprocess bridge instead.
+        self._use_gpu = False
         self._show_log = self.get_config("show_log", False)
-        
-        # Load the engine lazily to save VRAM when not in use
-        self._engine = None
-
-    def _get_engine(self):
-        if self._engine is None:
-            self.logger.info(f"Loading PaddleOCR PP-Structure Engine (GPU={self._use_gpu})...")
-            try:
-                import os
-                # Disable network health checks for fast GPU booting
-                os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-                
-                from paddleocr import PPStructureV3
-                # Disable warning logs from paddle
-                import logging
-                logging.getLogger("ppocr").setLevel(logging.ERROR)
-            except ImportError as e:
-                self.logger.error("PaddleOCR is not installed. Run `pip install paddleocr paddlepaddle-gpu`")
-                raise e
-            self._engine = PPStructureV3(show_log=self._show_log, use_gpu=self._use_gpu, lang="en")
-        return self._engine
 
     def execute(self, inputs: SkillInput) -> SkillOutput:
         start = time.monotonic()
-        
         parsed_doc: ParsedDocument = inputs.data["parsed_document"]
-        file_path = Path(inputs.data["file_path"])
+        file_path = inputs.data["file_path"]
         domain = inputs.data.get("domain", "General")
         
-        # Guard clause: We only do this computationally expensive pass if it's structural
         target_domains = ["Technical", "Financial", "Research", "Scientific"]
         if domain not in target_domains:
-            self.logger.info(f"Skipping Structure Recognition (Domain '{domain}' does not require intensive table parsing).")
             return SkillOutput(success=True, data=parsed_doc)
             
         self.logger.info(f"Initiating High-Fidelity Table Search for {domain} document.")
 
+        import subprocess
+        import sys
+        import json
+
+        pages_to_scan = [min(max(int(chunk.page_or_sheet) - 1, 0), parsed_doc.page_count - 1) for chunk in parsed_doc.chunks]
+        
+        payload = {
+            "file_path": file_path,
+            "pages_to_scan": list(set(pages_to_scan)), # dedupe
+            "use_gpu": self._use_gpu
+        }
+
+        bridge_script = str(Path(__file__).parent.parent / "utils" / "paddle_bridge.py")
+        
+        self.logger.info(f"Enforcing Process Isolation Bridge for Paddle GPU...")
+        
         try:
-            import fitz
-            import cv2
-            import numpy as np
-        except ImportError:
-            self.logger.error("PyMuPDF (fitz) or cv2 missing for Structure Recognition.")
-            return SkillOutput(success=False, data=None, error="Missing dependencies: fitz, cv2")
-
-        with fitz.open(str(file_path)) as doc:
-            try:
-                engine = self._get_engine()
-            except Exception as e:
-                self.logger.error(f"Failed to initialize PP-Structure engine: {e}")
-                return SkillOutput(success=False, data=parsed_doc, error=str(e))
+            # First attempt: Try with Configured Settings (usually GPU)
+            result = self._run_bridge(payload, bridge_script)
             
-            extracted_tables = []
-            new_chunks = []
+            # Critical Fallback: If GPU vision crashes due to CUDA DLL hell, try CPU vision to save the pipeline
+            if not result.get("success", False) and self._use_gpu:
+                self.logger.warning(f"GPU Table Bridge failed ({result.get('error')}). Retrying on CPU to prevent crash.")
+                payload["use_gpu"] = False
+                result = self._run_bridge(payload, bridge_script)
+
+        except Exception as e:
+            self.logger.error(f"Table Bridge execution failed: {e}")
+            return SkillOutput(success=False, data=parsed_doc, error=str(e))
+
+        if not result.get("success", False):
+            self.logger.error(f"Table Extraction definitively failed: {result.get('error')}")
+            return SkillOutput(success=False, data=parsed_doc, error=result.get("error"))
+
+        blocks = result.get("blocks", {})
+        extracted_tables = result.get("tables", [])
+        
+        new_chunks = []
+        for chunk in parsed_doc.chunks:
+            page_index = str(min(max(int(chunk.page_or_sheet) - 1, 0), parsed_doc.page_count - 1))
+            table_markdown_blocks = blocks.get(page_index, [])
             
-            for i, chunk in enumerate(parsed_doc.chunks):
-                # Convert page directly to high-res image
-                page_index = min(max(int(chunk.page_or_sheet) - 1, 0), len(doc) - 1)
-                page = doc[page_index]
+            if table_markdown_blocks:
+                new_text = chunk.text + "\n\n" + "\n".join(table_markdown_blocks)
+                self.logger.info(f"  Found {len(table_markdown_blocks)} HD tables on page {int(page_index) + 1}")
+            else:
+                new_text = chunk.text
                 
-                # Use 200 DPI to save VRAM but maintain cell integrity
-                pix = page.get_pixmap(dpi=200)
-                img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-                
-                if pix.n == 4:
-                    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
-                elif pix.n == 3:
-                    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                else:
-                    img_cv = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+            new_chunks.append(DocumentChunk(
+                text=new_text,
+                page_or_sheet=chunk.page_or_sheet,
+                chunk_index=chunk.chunk_index,
+                metadata={**chunk.metadata, "hd_tables": len(table_markdown_blocks)}
+            ))
 
-                self.logger.debug(f"  PP-Structure scanning page {page_index + 1}...")
-                results = engine(img_cv)
-                
-                table_markdown_blocks = []
-                
-                for res_idx, res in enumerate(results):
-                    res_type = res.get('type')
-                    if res_type == 'table':
-                        # res contains 'res' key with dict bearing 'html', etc.
-                        table_html = res.get('res', {}).get('html', '')
-                        
-                        # Store purely formatted table html/markdown string
-                        if table_html:
-                            table_str = f"[HIGH-FIDELITY TABLE - PAGE {page_index + 1}]\n{table_html}\n"
-                            table_markdown_blocks.append(table_str)
-                            
-                            extracted_tables.append({
-                                "page": page_index + 1,
-                                "index": res_idx,
-                                "html": table_html
-                            })
-                
-                # If we found high spatial tables, we append them to the existing chunk
-                # This allows the summarize skill to read the perfect HTML table rather than garbled strings
-                if table_markdown_blocks:
-                    new_text = chunk.text + "\n\n" + "\n".join(table_markdown_blocks)
-                    self.logger.info(f"  Found {len(table_markdown_blocks)} HD tables on page {page_index + 1}")
-                else:
-                    new_text = chunk.text
-                    
-                new_chunks.append(DocumentChunk(
-                    text=new_text,
-                    page_or_sheet=chunk.page_or_sheet,
-                    chunk_index=chunk.chunk_index,
-                    metadata={**chunk.metadata, "hd_tables": len(table_markdown_blocks)}
-                ))
-
-        # Update the parsed document with improved text and explicit tables list
         new_parsed_doc = ParsedDocument(
             file_name=parsed_doc.file_name,
             file_type=parsed_doc.file_type,
             chunks=new_chunks,
             full_text="\n\n".join(c.text for c in new_chunks),
-            tables=parsed_doc.tables + extracted_tables, # append new tables
+            tables=parsed_doc.tables + extracted_tables,
             metadata={**parsed_doc.metadata, "pp_structure": True},
             page_count=parsed_doc.page_count
         )
@@ -158,3 +115,36 @@ class StructureRecognitionSkill(BaseSkill):
             data=new_parsed_doc,
             duration_ms=(time.monotonic() - start) * 1000
         )
+
+    def _run_bridge(self, payload: dict, script_path: str) -> dict:
+        import subprocess
+        import sys
+        import json
+        
+        try:
+            # We use subprocess.run with a fresh environment if possible
+            env = os.environ.copy()
+            # HIDE common torch env vars from Paddle just in case
+            if "TORCH_HOME" in env: del env["TORCH_HOME"]
+
+            # On Windows, we need to hide the console window from Streamlit's process tree
+            process = subprocess.run(
+                [sys.executable, script_path, json.dumps(payload)],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                env=env,
+                creationflags=0x08000000 if os.name == 'nt' else 0 # CREATE_NO_WINDOW
+            )
+            
+            if process.returncode != 0:
+                return {"success": False, "error": f"Bridge Exit Code {process.returncode}: {process.stderr}"}
+            
+            # The script prints exactly one JSON line
+            for line in process.stdout.splitlines():
+                if line.strip().startswith("{"):
+                    return json.loads(line)
+                    
+            return {"success": False, "error": f"No valid JSON output. Stdout: {process.stdout}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.base_agent import BaseAgent
+from agents.planner_agent import PlannerAgent
+from agents.skill_executor import SkillExecutor
 from core.models import ParsedDocument, SkillInput
 from core.pipeline_result import PipelineResult
 from skills.document_classifier_skill import DocumentClassifierSkill
@@ -18,6 +20,11 @@ from skills.structure_recognition_skill import StructureRecognitionSkill
 from skills.question_extraction_skill import QuestionExtractionSkill
 from skills.summarization_skill import SummarizationSkill
 from skills.text_cleaner_skill import TextCleanerSkill
+from skills.rag_skill import RagSkill
+from skills.tts_skill import TTSSkill
+from skills.audio_transcription_skill import AudioTranscriptionSkill
+from skills.youtube_skill import YouTubeSkill
+from skills.compare_documents_skill import CompareDocumentsSkill
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,12 +34,17 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".xlsx": "excel",
     ".xls":  "excel",
     ".csv":  "excel",
+    ".mp3":  "audio",
+    ".mp4":  "audio",
+    ".wav":  "audio",
+    ".m4a":  "audio",
 }
 
 
 class DocumentAgent(BaseAgent):
     """
     Main document analysis orchestrator.
+    Now utilizes dynamic Planner + Executor agent loops instead of hardcoded rules.
     """
 
     name = "document_agent"
@@ -59,14 +71,25 @@ class DocumentAgent(BaseAgent):
                 "temperature":     gro.get("temperature", 0.15),
             }
         }
+        
+        self.planner = PlannerAgent(config={**cls_, **groq_skill_cfg})
 
-        self._pdf_reader  = PDFReaderSkill(config=pdf)
-        self._xls_reader  = ExcelReaderSkill(config=xls)
-        self._cleaner     = TextCleanerSkill(config=summ)
-        self._classifier  = DocumentClassifierSkill(config={**cls_, **groq_skill_cfg})
-        self._struct_rec  = StructureRecognitionSkill(config=pdf)
-        self._summarizer  = SummarizationSkill(config={**summ, **groq_skill_cfg})
-        self._q_extractor = QuestionExtractionSkill(config={**q_, **groq_skill_cfg})
+        self.skills = {
+            "pdf_reader": PDFReaderSkill(config=pdf),
+            "excel_reader": ExcelReaderSkill(config=xls),
+            "text_cleaner": TextCleanerSkill(config=summ),
+            "document_classifier": DocumentClassifierSkill(config={**cls_, **groq_skill_cfg}),
+            "structure_recognition": StructureRecognitionSkill(config=pdf),
+            "summarization": SummarizationSkill(config={**summ, **groq_skill_cfg}),
+            "question_extraction": QuestionExtractionSkill(config={**q_, **groq_skill_cfg}),
+            "rag": RagSkill(config=groq_skill_cfg),
+            "tts": TTSSkill(config={}),
+            "audio_transcription": AudioTranscriptionSkill(config={}),
+            "youtube": YouTubeSkill(config={}),
+            "compare_documents": CompareDocumentsSkill(config=groq_skill_cfg)
+        }
+        
+        self.executor = SkillExecutor(self.skills)
 
     # ── Main pipeline ─────────────────────────────────────────────────
 
@@ -86,72 +109,75 @@ class DocumentAgent(BaseAgent):
             return self._error_result(file_path, f"Unsupported file type")
         file_type = SUPPORTED_EXTENSIONS[ext]
 
-        # ── Step 1: Parse ─────────────────────────────────────────────
-        reader = self._pdf_reader if file_type == "pdf" else self._xls_reader
-        parse_out = reader.safe_execute(SkillInput(data={"file_path": str(file_path)}))
-        skill_timings["parse"] = parse_out.duration_ms
-        self._log_step("parse", parse_out.success, parse_out.duration_ms, parse_out.error)
+        # Build dynamic context dict
+        ux_overrides = getattr(self, '_ux_overrides', {})
+        context = {
+            "file_path": str(file_path),
+            "file_type": file_type,
+            "doc_type": "normal_document",
+            "domain": "General",
+            "summary_length": ux_overrides.get("summary_length", "medium"),
+            "technical_level": ux_overrides.get("technical_level", "intermediate"),
+            "page_from": ux_overrides.get("page_from", 0),
+            "page_to": ux_overrides.get("page_to", 0),
+        }
 
-        if not parse_out.success:
-            return self._error_result(file_path, f"Parsing failed")
+        # ── Step 1: Dynamic LLM Planning ──────────────────────────────
+        tasks = self.planner.plan(context)
 
-        parsed_doc: ParsedDocument = parse_out.data
-        warnings.extend(parse_out.warnings)
+        # ── Step 2: Skill Executor ────────────────────────────────────
+        self.logger.info(f"Executing planned paths: {tasks}")
+        results = self.executor.execute(tasks, context)
+        
+        # Compile logs directly from the dynamic results matrix
+        for task in tasks:
+            success = results.get(f"{task}_success", False)
+            dur = results.get(f"{task}_ms", 0.0)
+            err = results.get(f"{task}_error")
+            self._log_step(task, success, dur, err)
+            skill_timings[task] = dur
+            if err:
+                errors.append(err)
 
-        if parsed_doc.is_empty:
-            return self._error_result(file_path, "Document empty")
+        # ── Step 4: Map back to strict UI schema ──────────────────────
+        cls_data = results.get("document_classifier_data")
+        struc_data = results.get("structure_recognition_data")
+        summ_data = results.get("summarization_data")
+        q_data = results.get("question_extraction_data")
+        
+        # Get parsed document from readers or cleaners
+        parsed_doc = (
+            results.get("text_cleaner_data") or
+            results.get("audio_transcription_data") or
+            results.get("youtube_data") or
+            results.get("pdf_reader_data") or
+            results.get("excel_reader_data")
+        )
+        
+        if not parsed_doc:
+            return self._error_result(file_path, "Parsing failed — no document extracted.")
 
-        # ── Step 2: Clean ─────────────────────────────────────────────
-        clean_out = self._cleaner.safe_execute(SkillInput(data={"parsed_document": parsed_doc}))
-        skill_timings["clean"] = clean_out.duration_ms
-        self._log_step("clean", clean_out.success, clean_out.duration_ms, clean_out.error)
-
-        if clean_out.success and clean_out.data:
-            parsed_doc = clean_out.data
         full_text = parsed_doc.full_text
 
-        # ── Step 3: Classify ──────────────────────────────────────────
-        classify_out = self._classifier.safe_execute(SkillInput(data={"full_text": full_text}))
-        skill_timings["classify"] = classify_out.duration_ms
-        self._log_step("classify", classify_out.success, classify_out.duration_ms, classify_out.error)
+        # Classification mapping
+        doc_type     = cls_data.doc_type if cls_data else "normal_document"
+        domain       = cls_data.domain if cls_data else "General"
+        class_conf   = cls_data.confidence if cls_data else 0.0
+        class_method = cls_data.method if cls_data else "fallback"
 
-        class_result = classify_out.data if classify_out.success else None
-        doc_type     = class_result.doc_type if class_result else "normal_document"
-        domain       = class_result.domain if class_result else "General"
-        class_conf   = class_result.confidence if class_result else 0.0
-        class_method = class_result.method if class_result else "fallback"
+        # Structural mapping overrides
+        if struc_data:
+            parsed_doc = struc_data
+            full_text = parsed_doc.full_text
 
-        # ── Step 3.5: Specialized Structure Recognition (Tables) ──────
-        struct_out = self._struct_rec.safe_execute(SkillInput(data={
-            "parsed_document": parsed_doc,
-            "file_path": str(file_path),
-            "domain": domain
-        }))
-        skill_timings["structure_recognition"] = struct_out.duration_ms
-        self._log_step("structure_recognition", struct_out.success, struct_out.duration_ms, struct_out.error)
+        # Summarization mapping
+        summary = summ_data.get("summary", "") if summ_data else ""
+        summary_method = summ_data.get("method", "none") if summ_data else "none"
 
-        if struct_out.success and struct_out.data:
-            parsed_doc = struct_out.data
-            full_text = parsed_doc.full_text  # Update full_text with the new high-fidelity tables
+        # Questions mapping
+        questions = q_data.get("questions", []) if q_data else []
+        q_method  = q_data.get("method", "none") if q_data else "none"
 
-
-        # ── Step 4: Summarize ─────────────────────────────────────────
-        summ_out = self._summarizer.safe_execute(SkillInput(data={"full_text": full_text, "doc_type": doc_type, "domain": domain}))
-        skill_timings["summarize"] = summ_out.duration_ms
-        self._log_step("summarize", summ_out.success, summ_out.duration_ms, summ_out.error)
-
-        summary = summ_out.data.get("summary", "") if (summ_out.success and summ_out.data) else ""
-        summary_method = summ_out.data.get("method", "none") if (summ_out.success and summ_out.data) else "none"
-
-        # ── Step 5: Extract Questions ─────────────────────────────────
-        q_out = self._q_extractor.safe_execute(SkillInput(data={"full_text": full_text, "doc_type": doc_type, "domain": domain}))
-        skill_timings["extract_questions"] = q_out.duration_ms
-        self._log_step("extract_questions", q_out.success, q_out.duration_ms, q_out.error)
-
-        questions = q_out.data.get("questions", []) if (q_out.success and q_out.data) else []
-        q_method  = q_out.data.get("method", "none") if (q_out.success and q_out.data) else "none"
-
-        # ── Step 6: Assemble ──────────────────────────────────────────
         total_ms = (time.monotonic() - pipeline_start) * 1000
         return PipelineResult(
             file_name=file_path.name,
