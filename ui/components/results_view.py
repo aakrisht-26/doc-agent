@@ -144,7 +144,7 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
     story.append(Spacer(1, 14))
 
     # ── Summary ────────────────────────────────────────────────────────
-    story.append(p("📋  Summary", h1_s))
+    story.append(p("Summary", h1_s))
     story.append(hr())
     summary_text = result.summary or "No summary generated."
     for para_text in summary_text.split("\n\n"):
@@ -154,7 +154,7 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
 
     # ── Questions ─────────────────────────────────────────────────────
     if result.questions:
-        story.append(p(f"❓  Extracted Questions  ({len(result.questions)} found)", h1_s))
+        story.append(p(f"Extracted Questions  ({len(result.questions)} found)", h1_s))
         story.append(hr())
         for i, q in enumerate(result.questions, 1):
             story.append(p(f"{i}.   {q}"))
@@ -163,7 +163,7 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
     # ── Metadata ───────────────────────────────────────────────────────
     clean_meta = {k: v for k, v in result.metadata.items() if v and k not in ("engine",)}
     if clean_meta:
-        story.append(p("ℹ️  Document Metadata", h1_s))
+        story.append(p(" Document Metadata", h1_s))
         story.append(hr())
         table_data = [["Key", "Value"]] + [
             [Paragraph(str(k), meta_k), Paragraph(str(v)[:120], meta_v)]
@@ -171,7 +171,7 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
         ]
         tbl = Table(table_data, colWidths=[2.3 * inch, 4.5 * inch])
         tbl.setStyle(TableStyle([
-            ("BACKGROUND",  (0, 0), (-1, 0),  HexColor("#7C3AED")),
+            ("BACKGROUND",  (0, 0), (-1, 0),  HexColor("#3A43ED")),
             ("TEXTCOLOR",   (0, 0), (-1, 0),  colors.white),
             ("FONTNAME",    (0, 0), (-1, 0),  "Helvetica-Bold"),
             ("FONTSIZE",    (0, 0), (-1, 0),  9),
@@ -214,7 +214,7 @@ def generate_pdf_bytes(result: PipelineResult, font_size: int = 11, margin: floa
 
     # ── Errors / warnings ──────────────────────────────────────────────
     if result.errors:
-        story.append(p("⚠️  Errors", h2_s))
+        story.append(p("  Errors", h2_s))
         for err in result.errors:
             story.append(p(f"  ✘ {err}", note_s))
 
@@ -373,7 +373,7 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
     st.divider()
 
     # ── Tabs ───────────────────────────────────────────────────────────
-    tab_labels = ["📋 Summary", "❓ Questions", "📄 Raw Text", "ℹ️ Metadata"]
+    tab_labels = ["Summary", "Questions", "Raw Text", "Metadata"]
     tabs = st.tabs(tab_labels)
 
     # ── Tab 1: Summary ─────────────────────────────────────────────────
@@ -385,7 +385,6 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
         else:
             _html("""
             <div class="empty-state">
-              <span class="icon">🌫</span>
               <h3>No summary generated</h3>
               <p>Try enabling Ollama or check for errors in the Metadata tab.</p>
             </div>""")
@@ -407,7 +406,7 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
             
             # --- Dynamic Form Filling Sub-Component ---
             st.divider()
-            st.markdown("### 📝 Auto-Fill Application Form")
+            st.markdown("### Auto-Fill Application Form")
             st.caption("Provide your answers here. They will be seamlessly injected back into the document framework.")
             
             fill_state_key = f"form_fill_{result.file_name}"
@@ -428,7 +427,7 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
             # Phase 2: Processing and Render State
             else:
                 answers = st.session_state[fill_state_key]
-                st.success("✅ Form Inputs Confirmed")
+                st.success("Form Inputs Confirmed")
                 
                 if gen_state_key not in st.session_state:
                     with st.spinner("Generating Restructured Document via LLM..."):
@@ -458,7 +457,7 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
                     filled_md = st.session_state[gen_state_key]
                     
                     st.divider()
-                    st.markdown("#### 📄 Generated File")
+                    st.markdown("#### Generated File")
                     
                     with st.expander("Preview Restructured Text", expanded=True):
                         st.markdown(filled_md)
@@ -496,14 +495,12 @@ def render_results(result: PipelineResult, export_cfg: Optional[Any] = None) -> 
         elif result.doc_type == "questionnaire":
             _html("""
             <div class="empty-state">
-              <span class="icon">🔍</span>
               <h3>No questions found</h3>
               <p>The document was classified as a questionnaire but no questions could be extracted.</p>
             </div>""")
         else:
             _html(f"""
             <div class="empty-state">
-              <span class="icon">📄</span>
               <h3>Not a questionnaire</h3>
               <p>This document was classified as a <b>Normal Document</b> 
               ({result.classification_confidence:.0%} confidence).
